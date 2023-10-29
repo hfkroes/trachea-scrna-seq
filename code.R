@@ -2,6 +2,12 @@ library(Seurat)
 library(BPCells)
 library(DoubletFinder)
 library(glue)
+library(openxlsx)
+library(tidyverse)
+library(SingleR)
+library(ExperimentHub)
+library(zellkonverter)
+library(readxl)
 
 options(future.globals.maxSize = 3e+09)
 options(Seurat.object.assay.version = "v5")
@@ -55,103 +61,35 @@ LoadAndTreatSamples <- function(sample) {
 
 }
 
+FormatGenes <- function(input_string) {
+  words <- unlist(strsplit(input_string, ', '))
+  transformed_words <- lapply(words, function(word) {
+    if (nchar(word) > 1) {
+      paste(toupper(substr(word, 1, 1)), tolower(substr(word, 2, nchar(word))), sep = "")
+    } else {
+      word
+    }
+  })
+  result_vector <- unlist(transformed_words)
+  return(result_vector)
+}
+
+PlotGeneExpression <- function(data=aggregated_data, ref=canonical_markers_travaglini, cell_type) {
+  
+  markers <- FormatGenes(canonical_markers_travaglini$markers[,canonical_markers_travaglini$cell_type==cell_type])
+  FeaturePlot(aggregated_data, features = markers)
+  
+}
+
 samples = c('Decell_1m_M1', 'Decell_1m_M2', 'Decell_1m_M3', 'Decell_2wk_M1', 'Decell_2wk_M2', 'Native_U_M1', 'Native_U_M2', 'Native_U_M3', 'Syn_1m_M1', 'Syn_1m_M2', 'Syn_2wk_M1', 'Syn_2wk_M2')
 
 for (sample in samples) {
   assign(sample, LoadAndTreatSamples(sample))
 }
 
-"""
-#Load all 10X data
-Decell_1m_M1.data <- Read10X(data.dir = "./Decell_1m_M1/outs/filtered_feature_bc_matrix")
-Decell_1m_M1 <- CreateSeuratObject(counts = Decell_1m_M1.data, project = "Decell_1m_M1")
-Decell_1m_M1@meta.data$group <- 'Decell_1m'
-rm(Decell_1m_M1.data)
-Decell_1m_M1[["percent.mt"]] <- PercentageFeatureSet(Decell_1m_M1, pattern = "^mt-")
-Decell_1m_M1 <- subset(Decell_1m_M1, subset = nFeature_RNA > 200 & nCount_RNA < quantile(Decell_1m_M1@meta.data$nCount_RNA, 0.93) & percent.mt < 5)
-
-Decell_1m_M2.data <- Read10X(data.dir = "./Decell_1m_M2/outs/filtered_feature_bc_matrix")
-Decell_1m_M2 <- CreateSeuratObject(counts = Decell_1m_M2.data, project = "Decell_1m_M2")
-Decell_1m_M2@meta.data$group <- 'Decell_1m'
-rm(Decell_1m_M2.data)
-Decell_1m_M2[["percent.mt"]] <- PercentageFeatureSet(Decell_1m_M2, pattern = "^mt-")
-Decell_1m_M2 <- subset(Decell_1m_M2, subset = nFeature_RNA > 200 & nCount_RNA < quantile(Decell_1m_M2@meta.data$nCount_RNA, 0.93) & percent.mt < 5)
-
-Decell_1m_M3.data <- Read10X(data.dir = "./Decell_1m_M3/outs/filtered_feature_bc_matrix")
-Decell_1m_M3 <- CreateSeuratObject(counts = Decell_1m_M3.data, project = "Decell_1m_M3")
-Decell_1m_M3@meta.data$group <- 'Decell_1m'
-rm(Decell_1m_M3.data)
-Decell_1m_M3[["percent.mt"]] <- PercentageFeatureSet(Decell_1m_M3, pattern = "^mt-")
-Decell_1m_M3 <- subset(Decell_1m_M3, subset = nFeature_RNA > 200 & nCount_RNA < quantile(Decell_1m_M3@meta.data$nCount_RNA, 0.93) & percent.mt < 5)
-
-Decell_2wk_M1.data <- Read10X(data.dir = "./Decell_2wk_M1/outs/filtered_feature_bc_matrix")
-Decell_2wk_M1 <- CreateSeuratObject(counts = Decell_2wk_M1.data, project = "Decell_2wk_M1")
-Decell_2wk_M1@meta.data$group <- 'Decell_2wk'
-rm(Decell_2wk_M1.data)
-Decell_2wk_M1[["percent.mt"]] <- PercentageFeatureSet(Decell_2wk_M1, pattern = "^mt-")
-Decell_2wk_M1 <- subset(Decell_2wk_M1, subset = nFeature_RNA > 200 & nCount_RNA < quantile(Decell_2wk_M1@meta.data$nCount_RNA, 0.93) & percent.mt < 5)
-
-Decell_2wk_M2.data <- Read10X(data.dir = "./Decell_2wk_M2/outs/filtered_feature_bc_matrix")
-Decell_2wk_M2 <- CreateSeuratObject(counts = Decell_2wk_M2.data, project = "Decell_2wk_M2")
-Decell_2wk_M2@meta.data$group <- 'Decell_2wk'
-rm(Decell_2wk_M2.data)
-Decell_2wk_M2[["percent.mt"]] <- PercentageFeatureSet(Decell_2wk_M2, pattern = "^mt-")
-Decell_2wk_M2 <- subset(Decell_2wk_M2, subset = nFeature_RNA > 200 & nCount_RNA < quantile(Decell_2wk_M2@meta.data$nCount_RNA, 0.93) & percent.mt < 5)
-
-Native_U_M1.data <- Read10X(data.dir = "./Native_U_M1/outs/filtered_feature_bc_matrix")
-Native_U_M1 <- CreateSeuratObject(counts = Native_U_M1.data, project = "Native_U_M1")
-Native_U_M1@meta.data$group <- 'Native_U'
-rm(Native_U_M1.data)
-Native_U_M1[["percent.mt"]] <- PercentageFeatureSet(Native_U_M1, pattern = "^mt-")
-Native_U_M1 <- subset(Native_U_M1, subset = nFeature_RNA > 200 & nCount_RNA < quantile(Native_U_M1@meta.data$nCount_RNA, 0.93) & percent.mt < 5)
-
-Native_U_M2.data <- Read10X(data.dir = "./Native_U_M2/outs/filtered_feature_bc_matrix")
-Native_U_M2 <- CreateSeuratObject(counts = Native_U_M2.data, project = "Native_U_M2")
-Native_U_M2@meta.data$group <- 'Native_U'
-rm(Native_U_M2.data)
-Native_U_M2[["percent.mt"]] <- PercentageFeatureSet(Native_U_M2, pattern = "^mt-")
-Native_U_M2 <- subset(Native_U_M2, subset = nFeature_RNA > 200 & nCount_RNA < quantile(Native_U_M2@meta.data$nCount_RNA, 0.93) & percent.mt < 5)
-
-Native_U_M3.data <- Read10X(data.dir = "./Native_U_M3/outs/filtered_feature_bc_matrix")
-Native_U_M3 <- CreateSeuratObject(counts = Native_U_M3.data, project = "Native_U_M3")
-Native_U_M3@meta.data$group <- 'Native_U'
-rm(Native_U_M3.data)
-Native_U_M3[["percent.mt"]] <- PercentageFeatureSet(Native_U_M3, pattern = "^mt-")
-Native_U_M3 <- subset(Native_U_M3, subset = nFeature_RNA > 200 & nCount_RNA < quantile(Native_U_M3@meta.data$nCount_RNA, 0.93) & percent.mt < 5)
-
-Syn_1m_M1.data <- Read10X(data.dir = "./Syn_1m_M1/outs/filtered_feature_bc_matrix")
-Syn_1m_M1 <- CreateSeuratObject(counts = Syn_1m_M1.data, project = "Syn_1m_M1")
-Syn_1m_M1@meta.data$group <- 'Syn_1m'
-rm(Syn_1m_M1.data)
-Syn_1m_M1[["percent.mt"]] <- PercentageFeatureSet(Syn_1m_M1, pattern = "^mt-")
-Syn_1m_M1 <- subset(Syn_1m_M1, subset = nFeature_RNA > 200 & nCount_RNA < quantile(Syn_1m_M1@meta.data$nCount_RNA, 0.93) & percent.mt < 5)
-
-Syn_1m_M2.data <- Read10X(data.dir = "./Syn_1m_M2/outs/filtered_feature_bc_matrix")
-Syn_1m_M2 <- CreateSeuratObject(counts = Syn_1m_M2.data, project = "Syn_1m_M2")
-Syn_1m_M2@meta.data$group <- 'Syn_1m'
-rm(Syn_1m_M2.data)
-Syn_1m_M2[["percent.mt"]] <- PercentageFeatureSet(Syn_1m_M2, pattern = "^mt-")
-Syn_1m_M2 <- subset(Syn_1m_M2, subset = nFeature_RNA > 200 & nCount_RNA < quantile(Syn_1m_M2@meta.data$nCount_RNA, 0.93) & percent.mt < 5)
-
-Syn_2wk_M1.data <- Read10X(data.dir = "./Syn_2wk_M1/outs/filtered_feature_bc_matrix")
-Syn_2wk_M1 <- CreateSeuratObject(counts = Syn_2wk_M1.data, project = "Syn_2wk_M1")
-Syn_2wk_M1@meta.data$group <- 'Syn_2wk'
-rm(Syn_2wk_M1.data)
-Syn_2wk_M1[["percent.mt"]] <- PercentageFeatureSet(Syn_2wk_M1, pattern = "^mt-")
-Syn_2wk_M1 <- subset(Syn_2wk_M1, subset = nFeature_RNA > 200 & nCount_RNA < quantile(Syn_2wk_M1@meta.data$nCount_RNA, 0.93) & percent.mt < 5)
-
-Syn_2wk_M2.data <- Read10X(data.dir = "./Syn_2wk_M2/outs/filtered_feature_bc_matrix")
-Syn_2wk_M2 <- CreateSeuratObject(counts = Syn_2wk_M2.data, project = "Syn_2wk_M2")
-Syn_2wk_M2@meta.data$group <- 'Syn_2wk'
-rm(Syn_2wk_M2.data)
-Syn_2wk_M2[["percent.mt"]] <- PercentageFeatureSet(Syn_2wk_M2, pattern = "^mt-")
-Syn_2wk_M2 <- subset(Syn_2wk_M2, subset = nFeature_RNA > 200 & nCount_RNA < quantile(Syn_2wk_M2@meta.data$nCount_RNA, 0.93) & percent.mt < 5)
-"""
-
 aggregated_data <- merge(Decell_1m_M1, y = c(Decell_1m_M2, Decell_1m_M3, Decell_2wk_M1, Decell_2wk_M2, Native_U_M1, Native_U_M2, Native_U_M3, Syn_1m_M1, Syn_1m_M2, Syn_2wk_M1, Syn_2wk_M2), add.cell.ids = c('Decell_1m_M1', 'Decell_1m_M2', 'Decell_1m_M3', 'Decell_2wk_M1', 'Decell_2wk_M2', 'Native_U_M1', 'Native_U_M2', 'Native_U_M3', 'Syn_1m_M1', 'Syn_1m_M2', 'Syn_2wk_M1', 'Syn_2wk_M2'), project = "aggregated_data")
 rm(list = c('Decell_1m_M1', 'Decell_1m_M2', 'Decell_1m_M3', 'Decell_2wk_M1', 'Decell_2wk_M2', 'Native_U_M1', 'Native_U_M2', 'Native_U_M3', 'Syn_1m_M1', 'Syn_1m_M2', 'Syn_2wk_M1', 'Syn_2wk_M2'))
 
-aggregated_data <- SCTransform(aggregated_data, method = "glmGamPoi", vars.to.regress = "percent.mt", min_cells = 3)
 aggregated_data <- RunPCA(aggregated_data)
 pct <- aggregated_data[["pca"]]@stdev / sum(aggregated_data[["pca"]]@stdev) * 100
 cumu <- cumsum(pct)
@@ -170,4 +108,41 @@ DimPlot(aggregated_data, reduction = "umap", label = TRUE) + NoLegend()
 DimPlot(aggregated_data, reduction = "umap", split.by = 'group')
 
 aggregated_data <- PrepSCTFindMarkers(object = aggregated_data)
-all.markers <- FindAllMarkers(aggregated_data, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+all_markers <- FindAllMarkers(aggregated_data, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+write.xlsx(all.markers, 'markers.xlsx')
+
+eh <- ExperimentHub()
+tm_mm_trachea_ref <- eh[['EH1617']]
+tm_mm_trachea_ref <- tm_mm_trachea_ref[,tm_mm_trachea_ref$tissue == 'Trachea']
+tm_mm_trachea_ref <- tm_mm_trachea_ref[,!is.na(tm_mm_trachea_ref$cell_ontology_class)]
+tm_mm_trachea_ref <- as.Seurat(tm_mm_trachea_ref, data = NULL)
+tm_mm_trachea_ref <- SCTransform(tm_mm_trachea_ref, assay = "originalexp")
+tm_mm_trachea_ref <- as.SingleCellExperiment(tm_mm_trachea_ref)
+
+tm_labels <- SingleR(test = as.SingleCellExperiment(aggregated_data), ref = tm_mm_trachea_ref, labels = tm_mm_trachea_ref@colData$cell_ontology_class, num.threads = 26)
+aggregated_data@meta.data$tm_cell_type <- tm_labels$labels
+DimPlot(aggregated_data, reduction = "umap", group.by = 'tm_cell_type', label = TRUE)
+
+setwd("D:/Data/IC Ari")
+
+cxg_mm_trachea_ref <- readH5AD('Trachea_droplet.h5ad')
+cxg_mm_trachea_ref@assays@data@listData[["counts"]] <- cxg_mm_trachea_ref@assays@data@listData[["X"]]
+cxg_mm_trachea_ref <- as.Seurat(cxg_mm_trachea_ref, data = NULL)
+cxg_mm_trachea_ref <- SCTransform(cxg_mm_trachea_ref, assay = "originalexp")
+cxg_mm_trachea_ref <- as.SingleCellExperiment(cxg_mm_trachea_ref)
+
+cxg_labels <- SingleR(test = as.SingleCellExperiment(aggregated_data), ref = cxg_mm_trachea_ref, labels = cxg_mm_trachea_ref@colData$cell_ontology_class, num.threads = 26)
+aggregated_data@meta.data$cxg_cell_type <- cxg_labels$labels
+DimPlot(aggregated_data, reduction = "umap", group.by = 'cxg_cell_type', label = TRUE)
+
+canonical_markers_travaglini <- read_excel('canonical_markers_travaglini.xlsx')
+canonical_markers_travaglini <- canonical_markers_travaglini[, c(1, 4)]
+colnames(canonical_markers_travaglini) <- c('cell_type', 'markers')
+canonical_markers_travaglini <- subset(canonical_markers_travaglini, !cell_type %in% c("Capillary Cell", "Eosinophil", "Nonclassical Monocyte"))
+canonical_markers_travaglini <- canonical_markers_travaglini[complete.cases(canonical_markers_travaglini), ]
+
+for (ct in canonical_markers_travaglini$cell_type) {
+  print(ct)
+  p <- PlotGeneExpression(cell_type=ct)
+  ggsave(glue('ct_ge/{ct}.png'), p)
+}
