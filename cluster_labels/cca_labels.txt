@@ -1,0 +1,28 @@
+0 - Fibroblasts
+1 - Fibroblasts
+2 - Fibroblasts
+3 - Fibroblasts
+4 - Fibroblasts
+5 - Fibroblasts
+6 - Macrophages
+7 - Fibroblasts
+8 - Fibroblasts
+9 - Macrophages
+10 - Fibroblasts
+11 - Neutrophils
+12 - Perichondrial cells
+13 - Lymphoid cells
+14 - Fibroblasts
+15 - Fibroblasts
+16 - Fibroblasts
+17 - Lymphoid cells
+18 - Epithelial cells
+19 - Epithelial cells
+20 - Dendritic cells
+21 - Smooth muscle cells
+22 - Epithelial cells
+23 - Fibroblasts
+24 - Nerve cells
+25 - Endothelial cells
+26 - Endothelial cells
+27 - Fibroblasts

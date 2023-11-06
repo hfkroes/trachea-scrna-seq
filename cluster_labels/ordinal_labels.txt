@@ -1,0 +1,27 @@
+0 - Fibroblast
+1 - Fibroblast
+2 - Fibroblast
+3 - Fibroblast
+4 - Fibroblast
+5 - Macrophage
+6 - Perichondrocytes
+7 - Fibroblast
+8 - Macrophage
+9 - Myofibroblast
+10 - Neutrophils
+11 - T-cell
+12 - Fibroblast
+13 - Macrophage
+14 - Pericytes
+15 - Epithelial cell
+16 - Epithelial cell
+17 - Nerve cell
+18 - T-cell
+19 - Endothelial cell
+20 - Epithelial cell
+21 - Nuocytes
+22 - Myoepithelial cell
+23 - Lymph Endothelial cell
+24 - Smooth Muscle cell
+25 - Fibroblast
+26 - Nerve cell
