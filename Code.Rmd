@@ -1,0 +1,447 @@
+---
+title: '[Re] Regeneration of tracheal neotissue in partially decellularized scaffolds'
+author: "Hector Kroes"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    theme: paper
+    fig_width: 8
+    toc: true
+    toc_float: true
+    number_sections: true
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Setup
+
+## Packages
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+library(SeuratWrappers)
+library(ExperimentHub)
+library(DoubletFinder)
+library(tidyverse)
+library(patchwork)
+library(openxlsx)
+library(monocle3)
+library(SingleR)
+library(BPCells)
+library(harmony)
+library(rstatix)
+library(Seurat)
+library(readxl)
+library(future)
+library(ggpubr)
+library(glue)
+```
+
+## Options
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+set.seed(30)
+threads <- 26
+options(future.globals.maxSize = 3e+09)
+```
+
+## Functions
+
+```{r, warning=FALSE, message=FALSE}
+FormatObject <- function(object) {
+  for (old_name in names(object@meta.data)) {
+    if (grepl("^DF", old_name)) {
+      new_name <- "doubletfinder_category"
+      eval(parse(text = sprintf("object@meta.data$%s <- object@meta.data$%s", new_name, old_name)))
+    }
+  }
+  return(object)
+}
+
+DiscoverPCsThroughElbow <- function(object, reduction = "pca") {
+  pct <- object[[reduction]]@stdev / sum(object[[reduction]]@stdev) * 100
+  cumu <- cumsum(pct)
+  pc_min_1 <- which(cumu > 90 & pct < 5)[1]
+  pc_min_2 <- sort(which((pct[1:length(pct) - 1] - pct[2:length(pct)]) > 0.1), decreasing = T)[1] + 1
+  pcs <- min(pc_min_1, pc_min_2)
+  object$pcs <- pcs
+
+  return(object)
+}
+
+CalculateMtAndRp <- function(object) {
+  object[["percent_mt"]] <- PercentageFeatureSet(object, pattern = "^mt-")
+  object[["percent_rp"]] <- PercentageFeatureSet(object, pattern = "^Rp")
+
+  return(object)
+}
+
+ImplementQC <- function(object) {
+  object <- subset(object, subset = nFeature_RNA > 200 & percent_mt < 15 & doubletfinder_category == "Singlet")
+
+  return(object)
+}
+
+CalculateExpectedDoubletRate <- function(retrieved_cells) {
+  expected_doublet_rate <- (retrieved_cells / 500) * 0.004
+
+  return(expected_doublet_rate)
+}
+
+RunDoubletFinder <- function(object) {
+  sweep.res.list <- paramSweep_v3(object, PCs = 1:object$pcs, sct = TRUE)
+  sweep.stats <- summarizeSweep(sweep.res.list, GT = FALSE)
+  bcmvn <- find.pK(sweep.stats)
+  optimized_pK <- as.numeric(as.character(bcmvn$pK[which.max(bcmvn$BCmetric)]))
+  homotypic.prop <- modelHomotypic(object@meta.data$ClusteringResults)
+  cell_count <- nrow(object@meta.data)
+  nExp_poi <- round(CalculateExpectedDoubletRate(cell_count) * cell_count)
+  nExp_poi.adj <- round(nExp_poi * (1 - homotypic.prop))
+  object <- doubletFinder_v3(object, PCs = 1:object$pcs, pN = 0.25, pK = optimized_pK, nExp = nExp_poi.adj, sct = TRUE)
+
+  return(object)
+}
+
+PlotSingletVsDoublet <- function(singlet_var, doublet_var, var) {
+  singlet_vs_doublet <- data.frame(Classification = c(rep("Singlets", length(singlet_var)), rep("Doublets", length(doublet_var))), Values = c(singlet_var, doublet_var))
+
+  singlet_vs_doublet_t_test <- singlet_vs_doublet %>%
+    t_test(Values ~ Classification) %>%
+    add_significance()
+
+  violin_simple <- ggviolin(singlet_vs_doublet, x = "Classification", y = "Values", palette = c("#00AFBB", "#FC4E07"), ylab = var, xlab = "Classification", add = "mean", fill = "Classification")
+
+  singlet_vs_doublet_t_test <- singlet_vs_doublet_t_test %>% add_xy_position(x = "Classification")
+  violin_stats <- violin_simple + stat_pvalue_manual(singlet_vs_doublet_t_test, tip.length = 0) + labs(subtitle = get_test_label(singlet_vs_doublet_t_test, detailed = TRUE))
+
+  return(violin_stats)
+}
+
+LoadSamplesAndRemoveDoublets <- function(sample) {
+  group <- substr(sample, 1, nchar(sample) - 3)
+
+  options(Seurat.object.assay.version = "v3")
+
+  object <- Read10X(data.dir = glue("samples/{sample}/outs/filtered_feature_bc_matrix")) %>%
+    CreateSeuratObject(project = glue("{sample}")) %>%
+    CalculateMtAndRp()
+
+  violin_qc <- VlnPlot(object, features = c("nFeature_RNA", "nCount_RNA", "percent_mt", "percent_rp"), ncol = 4)
+  ggsave(glue("data/{sample}/QC/{sample}_qc_violin.png"), plot = violin_qc)
+
+  mt_rna <- FeatureScatter(object, feature1 = "nCount_RNA", feature2 = "percent_mt") + NoLegend()
+  gene_rna <- FeatureScatter(object, feature1 = "nCount_RNA", feature2 = "nFeature_RNA") + NoLegend()
+  feat_qc <- CombinePlots(plots = list(mt_rna, gene_rna))
+  ggsave(glue("data/{sample}/QC/{sample}_qc_feat.png"), plot = feat_qc)
+
+  object <- SCTransform(object, method = "glmGamPoi", vars.to.regress = "percent_mt", vst.flavor = "v2") %>%
+    RunPCA() %>%
+    DiscoverPCsThroughElbow()
+
+  object <- RunUMAP(object, dims = 1:object$pcs, min.dist = 0.2) %>%
+    RunDoubletFinder() %>%
+    FormatObject()
+
+  mt_percentage <- object[["percent_mt"]]
+  rp_percentage <- object[["percent_rp"]]
+  doublet_classification <- object[["doubletfinder_category"]]
+
+  doublets_plot <- DimPlot(object, reduction = "umap", group.by = "doubletfinder_category")
+  ggsave(glue("data/{sample}/DoubletFinder/{sample}_doublets.png"), plot = doublets_plot)
+
+  singlets <- subset(object, subset = doubletfinder_category == "Singlet")
+  doublets <- subset(object, subset = doubletfinder_category == "Doublet")
+
+  svd_mt_violin <- PlotSingletVsDoublet(singlets$percent_mt, doublets$percent_mt, "Percentage of Mitochondrial Genes")
+  ggsave(glue("data/{sample}/DoubletFinder/{sample}_svd_mt.png"), plot = svd_mt_violin)
+
+  svd_umi_violin <- PlotSingletVsDoublet(log(singlets$nCount_RNA), log(doublets$nCount_RNA), "log UMI Counts")
+  ggsave(glue("data/{sample}/DoubletFinder/{sample}_svd_umi.png"), plot = svd_umi_violin)
+
+  svd_genes_violin <- PlotSingletVsDoublet(log(singlets$nFeature_RNA), log(doublets$nFeature_RNA), "log Expressed Genes")
+  ggsave(glue("data/{sample}/DoubletFinder/{sample}_svd_gene.png"), plot = svd_genes_violin)
+
+  options(Seurat.object.assay.version = "v5")
+
+  convert_matrix_type(object@assays$RNA@counts, type = "uint32_t") %>%
+    write_matrix_dir(dir = glue("./data/{sample}/counts"))
+
+  object <- open_matrix_dir(dir = glue("./data/{sample}/counts")) %>%
+    CreateSeuratObject(project = sample)
+
+  object@meta.data$group <- group
+  object@meta.data$mt_percentage <- mt_percentage
+  object@meta.data$rp_percentage <- rp_percentage
+  object@meta.data$doublet_classification <- doublet_classification
+
+  return(object)
+}
+
+FormatGenes <- function(input_string) {
+  words <- unlist(strsplit(input_string, ", "))
+  transformed_words <- lapply(words, function(word) {
+    if (nchar(word) > 1) {
+      paste(toupper(substr(word, 1, 1)), tolower(substr(word, 2, nchar(word))), sep = "")
+    } else {
+      word
+    }
+  })
+  result_vector <- unlist(transformed_words)
+
+  return(result_vector)
+}
+
+PlotGeneExpression <- function(data = aggregated_data, ref = canonical_markers_travaglini, cell_type) {
+  print(glue("Plotting figure\nCell type: {cell_type}\nMarkers: {ref$markers[ref$cell_type==cell_type]}\n"))
+  markers <- FormatGenes(ref$markers[ref$cell_type == cell_type])
+  FeaturePlot(aggregated_data, features = markers)
+}
+
+FindAndSaveMarkers <- function(object, file_name) {
+  object <- PrepSCTFindMarkers(object)
+  all_markers <- FindAllMarkers(object, only.pos = TRUE, logfc.threshold = 0.25, min.pct = 0.25)
+  all_markers$diff.pct <- all_markers$pct.1 - all_markers$pct.2
+
+  write.xlsx(all_markers, glue("{file_name}"))
+  all_markers
+}
+```
+
+# Loading Data
+
+```{r echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+sample_names <- c("PDTG_1m_M1", "PDTG_1m_M2", "PDTG_1m_M3", "PDTG_2wk_M1", "PDTG_2wk_M2", "Native_M1", "Native_M2", "Native_M3", "STG_1m_M1", "STG_1m_M2", "STG_2wk_M1", "STG_2wk_M2")
+
+for (sample in sample_names) {
+  assign(sample, LoadSamplesAndRemoveDoublets(sample))
+}
+
+aggregated_data <- merge(PDTG_1m_M1, y = c(PDTG_1m_M2, PDTG_1m_M3, PDTG_2wk_M1, PDTG_2wk_M2, Native_M1, Native_M2, Native_M3, STG_1m_M1, STG_1m_M2, STG_2wk_M1, STG_2wk_M2), add.cell.ids = sample_names, project = "aggregated_data", merge.data = TRUE)
+
+dir.create("data/Aggregated")
+dir.create("data/Aggregated/objects")
+save(aggregated_data, file = "data/Aggregated/objects/pre_qc_data.Rdata")
+```
+
+# Quality control
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+sample_colors <- c("#005b96", "#6497b1", "#b3cde0", "#bf8bff", "#e5d0ff", "#bf0000", "#ff0000", "#ff7400", "#ffc100", "#f0f7da", "#398564", "#52bf90")
+
+mt_pre_qc <- VlnPlot(aggregated_data, features = "percent_mt", group.by = "orig.ident", pt.size = 0, cols = sample_colors)
+ggsave("data/Aggregated/plots/QC/mt_pre_qc.png", plot = mt_pre_qc)
+mt_pre_qc
+
+umi_pre_qc <- VlnPlot(aggregated_data, features = "nCount_RNA", group.by = "orig.ident", pt.size = 0, cols = sample_colors)
+ggsave("data/Aggregated/plots/QC/umi_pre_qc.png", plot = umi_pre_qc)
+umi_pre_qc
+
+genes_pre_qc <- VlnPlot(aggregated_data, features = "nFeature_RNA", group.by = "orig.ident", pt.size = 0, cols = sample_colors)
+ggsave("data/Aggregated/plots/QC/genes_pre_qc.png", plot = genes_pre_qc)
+genes_pre_qc
+
+save(aggregated_data, file = "data/Aggregated/objects/pre_qc.Rdata")
+```
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+aggregated_data <- ImplementQC(aggregated_data)
+
+mt_post_qc <- VlnPlot(aggregated_data, features = "percent_mt", group.by = "orig.ident", pt.size = 0, cols = sample_colors)
+ggsave("data/Aggregated/plots/QC/mt_post_qc.png", plot = mt_post_qc)
+mt_post_qc
+
+umi_post_qc <- VlnPlot(aggregated_data, features = "nCount_RNA", group.by = "orig.ident", pt.size = 0, cols = sample_colors)
+ggsave("data/Aggregated/plots/QC/umi_post_qc.png", plot = umi_post_qc)
+umi_post_qc
+
+genes_post_qc <- VlnPlot(aggregated_data, features = "nFeature_RNA", group.by = "orig.ident", pt.size = 0, cols = sample_colors)
+ggsave("data/Aggregated/plots/QC/genes_post_qc.png", plot = genes_post_qc)
+genes_post_qc
+```
+
+# Principal Component Analysis
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+aggregated_data <- aggregated_data %>%
+  SCTransform(vars.to.regress = c("percent_mt"), method = "glmGamPoi", vst.flavor = "v2", min_cells = 3) %>%
+  RunPCA(assay = "SCT", npcs = 50) %>%
+  DiscoverPCsThroughElbow()
+
+unintegrated_pca <- DimPlot(aggregated_data, reduction = "pca", group.by = "group", raster = FALSE)
+ggsave("data/Aggregated/plots/PCA/unintegrated_pca.png", plot = unintegrated_pca)
+unintegrated_pca
+
+elbow_plot <- ElbowPlot(aggregated_data, ndims = 50)
+ggsave("data/Aggregated/plots/PCA/elbow_plot.png", plot = elbow_plot)
+elbow_plot
+```
+
+# Unintegrated UMAP with low resolution clusters
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+aggregated_data <- RunUMAP(aggregated_data, dims = 1:aggregated_data$pcs, min.dist = 0.2) %>%
+  FindNeighbors(dims = 1:aggregated_data$pcs) %>%
+  FindClusters()
+
+unintegrated_lr_umap_clusters <- DimPlot(aggregated_data, reduction = "umap", label = TRUE, raster = FALSE) + NoLegend()
+ggsave("data/Aggregated/plots/UMAP_LR/unintegrated_lr_umap_clusters.png", plot = unintegrated_lr_umap_clusters)
+unintegrated_lr_umap_clusters
+
+unintegrated_lr_umap_clusters_by_group <- DimPlot(aggregated_data, reduction = "umap", group.by = "group", raster = FALSE)
+ggsave("data/Aggregated/plots/UMAP_LR/unintegrated_lr_umap_clusters_by_group.png", plot = unintegrated_lr_umap_clusters_by_group)
+unintegrated_lr_umap_clusters_by_group
+
+unintegrated_lr_umap_clusters_by_sample <- DimPlot(aggregated_data, reduction = "umap", group.by = "orig.ident", raster = FALSE)
+ggsave("data/Aggregated/plots/UMAP_LR/unintegrated_lr_umap_clusters_by_sample.png", plot = unintegrated_lr_umap_clusters_by_sample)
+unintegrated_lr_umap_clusters_by_sample
+
+FindAndSaveMarkers(aggregated_data, "data/Aggregated/markers/unintegrated_low_res_markers.xlsx")
+
+save(aggregated_data, file = "data/Aggregated/objects/unintegrated.Rdata")
+```
+
+# Unintegrated UMAP with high resolution clusters
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+aggregated_data <- FindClusters(aggregated_data, resolution = 1.4)
+
+unintegrated_hr_umap_clusters <- DimPlot(aggregated_data, reduction = "umap", label = TRUE, raster = FALSE) + NoLegend()
+ggsave("data/Aggregated/plots/UMAP_HR/unintegrated_hr_umap_clusters.png", plot = unintegrated_hr_umap_clusters)
+unintegrated_hr_umap_clusters
+
+FindAndSaveMarkers(aggregated_data, "data/Aggregated/markers/unintegrated_high_res_markers.xlsx")
+```
+
+# Integration with Harmony
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+aggregated_data <- RunHarmony(aggregated_data, group.by.vars = c("orig.ident"), reduction = "pca", assay.use = "SCT", reduction.save = "harmony", ncores = 26) %>%
+  DiscoverPCsThroughElbow(reduction = "harmony")
+
+aggregated_data <- RunUMAP(aggregated_data, reduction = "harmony", dims = 1:aggregated_data$pcs, min.dist = 0.2) %>%
+  FindNeighbors(reduction = "harmony", dims = 1:aggregated_data$pcs) %>%
+  FindClusters(resolution = 1.4)
+
+integrated_pca <- DimPlot(aggregated_data, reduction = "umap", label = TRUE, raster = FALSE) + NoLegend()
+ggsave("data/Aggregated/plots/Harmony/harmony_pca.png", plot = integrated_pca)
+integrated_pca
+
+integrated_umap_clusters <- DimPlot(aggregated_data, reduction = "umap", label = TRUE, raster = FALSE) + NoLegend()
+ggsave("data/Aggregated/plots/Harmony/harmony_umap_clusters.png", plot = integrated_umap_clusters)
+integrated_umap_clusters
+
+integrated_umap_clusters_by_group <- DimPlot(aggregated_data, reduction = "umap", split.by = "group", raster = FALSE)
+ggsave("data/Aggregated/plots/Harmony/harmony_umap_clusters_by_group.png", plot = integrated_umap_clusters_by_group)
+integrated_umap_clusters_by_group
+
+integrated_umap_clusters_by_sample <- DimPlot(aggregated_data, reduction = "umap", label = FALSE, group.by = "orig.ident", raster = FALSE)
+ggsave("data/Aggregated/plots/Harmony/harmony_umap_clusters_by_sample.png", plot = integrated_umap_clusters_by_sample)
+integrated_umap_clusters_by_sample
+
+save(aggregated_data, file = "data/Aggregated/objects/harmony_integration.Rdata")
+```
+
+# Tabula Muris EH SingleR Annotation
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+eh <- ExperimentHub()
+tm_mm_trachea_ref <- eh[["EH1617"]]
+tm_mm_trachea_ref <- tm_mm_trachea_ref[, tm_mm_trachea_ref$tissue == "Trachea"]
+tm_mm_trachea_ref <- tm_mm_trachea_ref[, !is.na(tm_mm_trachea_ref$cell_ontology_class)]
+tm_mm_trachea_ref <- as.Seurat(tm_mm_trachea_ref, data = NULL)
+tm_mm_trachea_ref <- CalculateMtAndRp(tm_mm_trachea_ref)
+tm_mm_trachea_ref <- SCTransform(tm_mm_trachea_ref, assay = "originalexp", vst.flavor = "v2", method = "glmGamPoi", min_cells = 3, vars.to.regress = "percent_mt")
+tm_mm_trachea_ref <- as.SingleCellExperiment(tm_mm_trachea_ref)
+
+tm_labels <- SingleR(test = as.SingleCellExperiment(aggregated_data, assay = "SCT"), ref = tm_mm_trachea_ref, labels = tm_mm_trachea_ref@colData$cell_ontology_class, num.threads = threads)
+aggregated_data@meta.data$tm_cell_type <- tm_labels$labels
+
+tm_singler_plot <- DimPlot(aggregated_data, reduction = "umap", label = TRUE, group.by = "tm_cell_type", raster = FALSE) + NoLegend()
+ggsave(glue("data/Aggregated/plots/SingleR/tabula_muris_annotation.png"), plot = tm_singler_plot)
+tm_singler_plot
+```
+
+# Canonical Markers by Travaglini et. al.
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+canonical_markers_travaglini <- read_excel("canonical_markers_travaglini.xlsx")
+canonical_markers_travaglini <- canonical_markers_travaglini[, c(1, 4)]
+colnames(canonical_markers_travaglini) <- c("cell_type", "markers")
+canonical_markers_travaglini <- subset(canonical_markers_travaglini, !cell_type %in% c("Capillary Cell", "Eosinophil", "Nonclassical Monocyte", "Myeloid Dendritic Cell 1"))
+canonical_markers_travaglini <- canonical_markers_travaglini[complete.cases(canonical_markers_travaglini), ]
+
+for (ct in canonical_markers_travaglini$cell_type) {
+  p <- PlotGeneExpression(cell_type = ct)
+  ggsave(glue("data/Aggregated/plots/Travaglini/{ct}.png"), p)
+}
+```
+
+# Marker genes
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+FindAndSaveMarkers(aggregated_data, "data/Aggregated/markers/harmony_markers.xlsx")
+```
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+mapping <- c("0" = "Fb", "1" = "Fb", "2" = "Fb", "3" = "Fb", "4" = "Fb", "5" = "Fb", "6" = "Fb", "7" = "MΦ", "8" = "Fb", "9" = "Neut", "10" = "Pchon", "11" = "Fb", "12" = "Fb", "13" = "Pchon", "14" = "MΦ", "15" = "Epi", "16" = "MΦ", "17" = "Pchon", "18" = "MFb", "19" = "Lym", "20" = "Lym", "21" = "SMC", "22" = "MΦ", "23" = "MΦ", "24" = "Fb", "25" = "NC", "26" = "Lym", "27" = "Pchon", "28" = "Epi", "29" = "Pchon", "30" = "Epi", "31" = "EC", "32" = "EC", "33" = "Pchon", "34" = "LEC", "35" = "BC", "36" = "SMC", "37" = "Epi", "38" = "Epi", "39" = "EC")
+
+aggregated_data[["cell_type"]] <- recode(aggregated_data@active.ident, !!!mapping)
+
+integrated_umap_cell_types <- DimPlot(aggregated_data, reduction = "umap", raster = FALSE, group.by = "cell_type")
+ggsave("data/Aggregated/plots/Harmony/Harmony_umap_cell_types.png", plot = integrated_umap_cell_types)
+integrated_umap_cell_types
+
+cell_type_distribution <- data.frame(t(t(table(aggregated_data$cell_type, aggregated_data$group)) / as.vector(table(aggregated_data$group))) * 100)
+integrated_cell_type_distribution <- ggplot(cell_type_distribution, aes(x = Var1, y = Freq, fill = Var2)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  ylab("Percentage of Cells") +
+  xlab("Cell Type") +
+  ggtitle("Percentage of Cells by Cell Type and Group") +
+  theme_minimal()
+ggsave("data/Aggregated/plots/Harmony/harmony_cell_type_distribution.png", plot = integrated_cell_type_distribution)
+integrated_cell_type_distribution
+```
+
+# Epithelium Analisys
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+aggregated_data[["vc"]] <- aggregated_data@reductions[["umap"]]@cell.embeddings[, 2]
+epi_data <- subset(aggregated_data, subset = cell_type == "Epi" & vc < -5) %>%
+  FindNeighbors(reduction = "pca", dims = 1:epi_data$pcs) %>%
+  FindClusters()
+
+DimPlot(epi_data, reduction = "umap", label = TRUE, raster = FALSE) + NoLegend()
+
+epi_data <- PrepSCTFindMarkers(epi_data)
+FindAndSaveMarkers(epi_data, "data/Epithelial/markers/integrated_markers.xlsx")
+```
+
+# Trajectory Inference
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+epi_data <- as.cell_data_set(epi_data)
+epi_data <- cluster_cells(epi_data, resolution = 1e-3)
+
+p1 <- plot_cells(epi_data, color_cells_by = "cluster", show_trajectory_graph = FALSE)
+p2 <- plot_cells(epi_data, color_cells_by = "partition", show_trajectory_graph = FALSE)
+wrap_plots(p1, p2)
+```
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+epi_data <- learn_graph(epi_data, use_partition = TRUE, verbose = FALSE)
+
+epi_data <- order_cells(epi_data, root_cells = colnames(epi_data[, clusters(epi_data) == 8]))
+plot_cells(epi_data,
+  color_cells_by = "pseudotime",
+  group_cells_by = "cluster",
+  label_cell_groups = FALSE,
+  label_groups_by_cluster = FALSE,
+  label_leaves = FALSE,
+  label_branch_points = FALSE,
+  label_roots = FALSE,
+  trajectory_graph_color = "grey60"
+)
+```
