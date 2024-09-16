@@ -22,9 +22,11 @@ knitr::opts_chunk$set(echo = TRUE)
 ## Packages
 
 ```{r echo=TRUE, message=FALSE, warning=FALSE}
+library(clusterProfiler)
 library(SeuratWrappers)
 library(ExperimentHub)
 library(DoubletFinder)
+library(org.Hs.eg.db)
 library(tidyverse)
 library(patchwork)
 library(openxlsx)
@@ -382,11 +384,12 @@ for (ct in canonical_markers_travaglini$cell_type) {
 # Marker genes
 
 ```{r echo=TRUE, message=FALSE, warning=FALSE}
+dir.create("data/Aggregated/markers")
 FindAndSaveMarkers(aggregated_data, "data/Aggregated/markers/harmony_markers.xlsx")
 ```
 
 ```{r echo=TRUE, message=FALSE, warning=FALSE}
-mapping <- c("0" = "Fb", "1" = "Fb", "2" = "Fb", "3" = "Fb", "4" = "Fb", "5" = "Fb", "6" = "Fb", "7" = "MΦ", "8" = "Fb", "9" = "Neut", "10" = "Pchon", "11" = "Fb", "12" = "Fb", "13" = "Pchon", "14" = "MΦ", "15" = "Epi", "16" = "MΦ", "17" = "Pchon", "18" = "MFb", "19" = "Lym", "20" = "Lym", "21" = "SMC", "22" = "MΦ", "23" = "MΦ", "24" = "Fb", "25" = "NC", "26" = "Lym", "27" = "Pchon", "28" = "Epi", "29" = "Pchon", "30" = "Epi", "31" = "EC", "32" = "EC", "33" = "Pchon", "34" = "LEC", "35" = "BC", "36" = "SMC", "37" = "Epi", "38" = "Epi", "39" = "EC")
+mapping <- c("0" = "Fb", "1" = "Fb", "2" = "Fb", "3" = "Fb", "4" = "Fb", "5" = "Fb", "6" = "MΦ", "7" = "Fb", "8" = "Fb", "9" = "Fb", "10" = "Neut", "11" = "Fb", "12" = "Pchon", "13" = "Fb", "14" = "MΦ", "15" = "MFb", "16" = "MΦ", "17" = "Pchon", "18" = "Lym", "19" = "Pchon", "20" = "Epi", "21" = "MΦ", "22" = "MΦ", "23" = "Lym", "24" = "Lym", "25" = "NC", "26" = "Lym", "27" = "Epi", "28" = "Fb", "29" = "SMC", "30" = "SMC", "31" = "EC", "32" = "EC", "33" = "Epi", "34" = "LEC", "35" = "Epi", "36" = "BC", "37" = "Epi", "38" = "Epi", "39" = "Epi", "40" = "EC")
 
 aggregated_data[["cell_type"]] <- recode(aggregated_data@active.ident, !!!mapping)
 
@@ -408,27 +411,57 @@ integrated_cell_type_distribution
 # Epithelium Analisys
 
 ```{r echo=TRUE, message=FALSE, warning=FALSE}
-aggregated_data[["vc"]] <- aggregated_data@reductions[["umap"]]@cell.embeddings[, 2]
-epi_data <- subset(aggregated_data, subset = cell_type == "Epi" & vc < -5) %>%
-  FindNeighbors(reduction = "pca", dims = 1:epi_data$pcs) %>%
+#aggregated_data[["vc"]] <- aggregated_data@reductions[["umap"]]@cell.embeddings[, 2]
+
+epi_data <- subset(aggregated_data, subset = cell_type == "Epi")
+
+epi_data <- epi_data %>%
+  SCTransform(vars.to.regress = c("percent_mt"), method = "glmGamPoi", vst.flavor = "v2", min_cells = 3) %>%
+  RunPCA(assay = "SCT", npcs = 50) %>%
+  DiscoverPCsThroughElbow()
+
+epi_data <- epi_data %>%
+  RunUMAP(reduction = "pca", dims = 1:epi_data$pcs, min.dist = 0.2) %>%
+  FindNeighbors(dims = 1:epi_data$pcs) %>%
   FindClusters()
 
-DimPlot(epi_data, reduction = "umap", label = TRUE, raster = FALSE) + NoLegend()
+dir.create("data/Epithelial")
+dir.create("data/Epithelial/plots")
+dir.create("data/Epithelial/markers")
+dir.create("data/Epithelial/objects")
+
+epithelial_umap <- DimPlot(epi_data, reduction = "umap", label = TRUE, raster = FALSE) + NoLegend()
+ggsave("data/Epithelial/plots/umap_clusters.png", plot = epithelial_umap)
 
 epi_data <- PrepSCTFindMarkers(epi_data)
-FindAndSaveMarkers(epi_data, "data/Epithelial/markers/integrated_markers.xlsx")
+FindAndSaveMarkers(epi_data, "data/Epithelial/markers/epithelial_markers.xlsx")
+
+save(epi_data, file = "data/Epithelial/objects/seurat_umap_clusters.Rdata")
 ```
 
 # Trajectory Inference
 
 ```{r echo=TRUE, message=FALSE, warning=FALSE}
+epi_data[["vc1"]] <- epi_data@reductions[["umap"]]@cell.embeddings[, 1]
+epi_data[["vc2"]] <- epi_data@reductions[["umap"]]@cell.embeddings[, 2]
+
+epi_data2 <- subset(epi_data, subset = vc1 > -10 & vc2 < 10)
+
 epi_data <- as.cell_data_set(epi_data)
-epi_data <- cluster_cells(epi_data, resolution = 1e-3)
+epi_data <- cluster_cells(epi_data, k = 25, resolution = 1e-3)
 
 p1 <- plot_cells(epi_data, color_cells_by = "cluster", show_trajectory_graph = FALSE)
 p2 <- plot_cells(epi_data, color_cells_by = "partition", show_trajectory_graph = FALSE)
 wrap_plots(p1, p2)
 ```
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+genes_of_interest <- c("GeneA", "GeneB")
+
+gene_data <- FetchData(seurat_obj, vars = genes_of_interest)
+
+```
+
 
 ```{r echo=TRUE, message=FALSE, warning=FALSE}
 epi_data <- learn_graph(epi_data, use_partition = TRUE, verbose = FALSE)
@@ -445,3 +478,32 @@ plot_cells(epi_data,
   trajectory_graph_color = "grey60"
 )
 ```
+
+```{r}
+Idents(epi_data) <- "group"
+
+DEG_PDTG_2wk <- FindMarkers(epi_data, ident.1 = "PDTG_2wk", ident.2 = "Native")
+DEG_PDTG_1m <- FindMarkers(epi_data, ident.1 = "PDTG_1m", ident.2 = "Native")
+DEG_STG_2wk <- FindMarkers(epi_data, ident.1 = "STG_2wk", ident.2 = "Native")
+DEG_STG_1m <- FindMarkers(epi_data, ident.1 = "STG_1m", ident.2 = "Native")
+
+genes_PDTG_2wk <- toupper(rownames(DEG_PDTG_2wk[DEG_PDTG_2wk$p_val_adj < 0.05, ]))
+genes_PDTG_1m <- toupper(rownames(DEG_PDTG_1m[DEG_PDTG_1m$p_val_adj < 0.05, ]))
+genes_STG_2wk <- toupper(rownames(DEG_STG_2wk[DEG_STG_2wk$p_val_adj < 0.05, ]))
+genes_STG_1m <- toupper(rownames(DEG_STG_1m[DEG_STG_1m$p_val_adj < 0.05, ]))
+
+go_PDTG_2wk <- enrichGO(gene = genes_PDTG_2wk, OrgDb = org.Hs.eg.db, keyType = "SYMBOL", ont = "BP", pAdjustMethod = "BH")
+go_PDTG_1m <- enrichGO(gene = genes_PDTG_1m, OrgDb = org.Hs.eg.db, keyType = "SYMBOL", ont = "BP", pAdjustMethod = "BH")
+go_STG_2wk <- enrichGO(gene = genes_STG_2wk, OrgDb = org.Hs.eg.db, keyType = "SYMBOL", ont = "BP", pAdjustMethod = "BH")
+go_STG_1m <- enrichGO(gene = genes_STG_1m, OrgDb = org.Hs.eg.db, keyType = "SYMBOL", ont = "BP", pAdjustMethod = "BH")
+
+dotplot(go_PDTG_2wk, showCategory = 10)
+dotplot(go_PDTG_1m, showCategory = 10)
+dotplot(go_STG_2wk, showCategory = 10)
+dotplot(go_STG_1m, showCategory = 10)
+
+gene_sets <- list(Group1 = genes_PDTG_2wk, Group2 = genes_PDTG_1m, Group3 = genes_STG_2wk, Group4 = genes_STG_1m)
+compare_go <- compareCluster(geneCluster = gene_sets, fun = "enrichGO", OrgDb = org.Hs.eg.db, keyType = "SYMBOL", ont = "BP")
+dotplot(compare_go, showCategory = 10)
+```
+
